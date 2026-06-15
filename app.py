@@ -16,7 +16,6 @@ from db_sim import (USERS, PATIENTS, get_user_by_id, authenticate, init_db,
                     add_provider_file, get_patient_files, create_request, update_request,
                     get_request, get_patient_requests, get_provider_requests, DB_PATH)
 from logger import log_metrics, read_logs, log_security_event, read_security_logs, LOG_FILE, SECURITY_LOG_FILE
-from expert_eval import ISO_25010_CRITERIA, LIKERT_SCALE, save_evaluation, get_eval_summary, get_descriptive_rating, EVAL_FILE
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -96,7 +95,7 @@ if not st.session_state.authenticated:
     st.markdown("""
     <div class="main-header">
         <h1>🏥 Secure Health Information Exchange System</h1>
-        <p>Enhanced AES-ECDH-ECDSA + Key Confirmation + File-Level Consent | ISO/IEC 25010:2015</p>
+        <p>Enhanced AES-ECDH-ECDSA + Key Confirmation + File-Level Consent</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -225,6 +224,7 @@ if user_data['role'] == "Healthcare Provider":
         if st.button("🔐 Request Access", type="primary", disabled=len(requested_file_ids)==0):
             req_id = f"REQ-{datetime.now().strftime('%Y%m%d%H%M%S')}"
             start_time = time.perf_counter()
+            st.session_state[f'req_start_{req_id}'] = start_time
 
             # 1. Generate ephemeral ECDH keypair - store in temp for PFS
             provider_priv, provider_pub = generate_ecdh_keypair()
@@ -296,8 +296,19 @@ if user_data['role'] == "Healthcare Provider":
                             st.caption(f"Decrypting with AAD: {aad}")
     
                             try:
+                                            # TIME THE DECRYPTION
+                                decryption_start = time.perf_counter()
                                 decrypted_json = aes_decrypt_enhanced(aes_key, req['encrypted_payload'], aad)
+                                decryption_end = time.perf_counter()
+                                decryption_time = decryption_end - decryption_start
+            
+                                # LOG IT IMMEDIATELY AFTER SUCCESS
+                                log_metrics(user_id, "Decryption Time - File Decryption", decryption_time, req_id, req['patient_id'], user_id)
+                                decrypted_json = aes_decrypt_enhanced(aes_key, req['encrypted_payload'], aad)
+
                                 decrypted_data = json.loads(decrypted_json)
+
+                                st.success(f"✅ Decryption successful | Decrypt Time: {decryption_time:.4f}s")
 
                                 st.write("**Decrypted Files:**")
                                 for file_info in decrypted_data['selected_files']:
@@ -314,12 +325,16 @@ if user_data['role'] == "Healthcare Provider":
                                 st.write(f"Expected AAD: `{aad}`")
                                 st.write(f"Payload size: {len(req['encrypted_payload'])} bytes")
                                 st.caption("If AAD looks correct, the ciphertext may be corrupted")
+                                st.stop()
+
 
                         with st.expander("🔍 Show Encryption Details"):
                             st.write("**1. Encrypted Payload (AES-256-GCM + AAD)**")
                             st.code(req['encrypted_payload'][:64].hex() + "...", language="text")
                             st.write("**2. Key Confirmation MAC**")
                             st.code(req.get('key_confirmation_mac', b'').hex(), language="text")
+                        
+                        
 
                     elif req['status'] == "Denied":
                         st.error("Access Denied by Patient")
@@ -552,10 +567,15 @@ elif user_data['role'] == "Patient":
                         aad = f"{user_id}:{req['provider_id']}:{req_id}:{','.join(approved_files)}"
                         encrypted_data = aes_encrypt_enhanced(aes_key, plaintext, aad)
 
+                        # Measure just the crypto time
+                        crypto_start = time.perf_counter()
+                        encrypted_data = aes_encrypt_enhanced(aes_key, plaintext, aad)
+                        crypto_end = time.perf_counter()
+                        crypto_time = crypto_end - crypto_start
 
                         st.write(f"DEBUG - AAD being stored: {aad}")
                         end_time = time.perf_counter()
-                        access_time = end_time - req['start_time']
+                        total_access_time = end_time - req['start_time']
 
                         update_request(
                             request_id=req_id,
@@ -569,14 +589,18 @@ elif user_data['role'] == "Patient":
                             salt=salt,
                             signature_verified=1 if sig_valid else 0,
                             key_confirmation_verified=1 if mac_valid else 0,
-                            access_time=access_time
+                            access_time=total_access_time
                         )
 
                         # PFS: Delete ephemeral keys
                         del patient_priv, mac_key
 
-                        log_metrics(user_id, "Access Granted - Granular", access_time, req_id, user_id, req['provider_id'])
+                         # Log both times separately for thesis
+                        log_metrics(user_id, "Total Access Time - End to End", total_access_time, req_id, user_id, req['provider_id'])
+                        log_metrics(user_id, "Encryption Only", crypto_time, req_id, user_id, req['provider_id'])
+                        
                         st.success(f"✅ Approved! {len(approved_files)} files encrypted with AAD binding")
+                        st.info(f"⏱ Total: {total_access_time:.4f}s | Encryption: {crypto_time:.4f}s")
                         st.balloons()
                         time.sleep(1)
                         st.rerun()
@@ -613,137 +637,137 @@ elif user_data['role'] == "Patient":
 
 # ==================== ADMIN PORTAL ====================
 elif user_data['role'] == "Admin":
-    st.header("⚙ System Administrator / IT Expert Portal")
+    st.header("⚙ System Administrator Portal")
+    st.caption("Performance monitoring and security audit for thesis validation")
 
-    tab1, tab2, tab3 = st.tabs(["📊 Performance Dashboard", "📝 Expert Evaluation", "📋 System Logs"])
+    tab1, tab2 = st.tabs(["📊 Performance Metrics", "📋 Security Audit Logs"])
 
     with tab1:
-        st.subheader("ISO/IEC 25010 Performance Efficiency Metrics")
+        st.subheader("System Performance - Two Required Tests")
+        st.caption("Data for approval time and encryption/decryption performance")
+        
         logs = read_logs()
         if logs:
             df = pd.DataFrame(logs)
             df['access_time_sec'] = pd.to_numeric(df['access_time_sec'])
+            
+            # Split metrics by type
+            total_time_df = df[df['action'] == 'Total Access Time - End to End']
+            encryption_df = df[df['action'] == 'Encryption Only']
+            decryption_df = df[df['action'] == 'Decryption Time - File Decryption']
+            
             col1, col2, col3 = st.columns(3)
-            col1.metric("Total Requests", len(df))
-            col2.metric("Avg Access Time", f"{df['access_time_sec'].mean():.4f}s")
-            col3.metric("Max Access Time", f"{df['access_time_sec'].max():.4f}s")
-            st.line_chart(df.set_index('timestamp')['access_time_sec'])
+            
+            with col1:
+                st.markdown("**Test 1: Approval Time**")
+                st.caption("Request → Patient Approves")
+                if not total_time_df.empty:
+                    avg_total = total_time_df['access_time_sec'].mean()
+                    st.metric("Average", f"{avg_total:.4f}s")
+                    st.metric("Min", f"{total_time_df['access_time_sec'].min():.4f}s")
+                    st.metric("Max", f"{total_time_df['access_time_sec'].max():.4f}s")
+                    st.metric("Samples", len(total_time_df))
+                else:
+                    st.info("No data yet")
+            
+            with col2:
+                st.markdown("**Test 2: Encryption Time**")
+                st.caption("AES-256-GCM + AAD")
+                if not encryption_df.empty:
+                    avg_enc = encryption_df['access_time_sec'].mean()
+                    st.metric("Average", f"{avg_enc:.4f}s")
+                    st.metric("Min", f"{encryption_df['access_time_sec'].min():.4f}s")
+                    st.metric("Max", f"{encryption_df['access_time_sec'].max():.4f}s")
+                    st.metric("Samples", len(encryption_df))
+                else:
+                    st.info("No data yet")
+            
+            with col3:
+                st.markdown("**Test 2: Decryption Time**")
+                st.caption("AES-256-GCM Verify")
+                if not decryption_df.empty:
+                    avg_dec = decryption_df['access_time_sec'].mean()
+                    st.metric("Average", f"{avg_dec:.4f}s")
+                    st.metric("Min", f"{decryption_df['access_time_sec'].min():.4f}s")
+                    st.metric("Max", f"{decryption_df['access_time_sec'].max():.4f}s")
+                    st.metric("Samples", len(decryption_df))
+                else:
+                    st.info("No data yet")
+            
+            st.divider()
+            
+            # Combined chart
+            if not df.empty:
+                st.subheader("Performance Timeline")
+                chart_data = df.pivot_table(
+                    index='timestamp', 
+                    columns='action', 
+                    values='access_time_sec',
+                    aggfunc='mean'
+                )
+                st.line_chart(chart_data)
+            
+            st.divider()
+            
+            # Full data table
+            st.subheader("Raw Performance Data")
+            st.dataframe(df, use_container_width=True)
+            
+            # Export for thesis
+            csv = df.to_csv(index=False)
+            st.download_button(
+                "📥 Download thesis_performance_data.csv",
+                csv,
+                "thesis_performance_data.csv",
+                "text/csv",
+                help="Use this CSV to calculate averages for your defense"
+            )
+            
+            # Calculate averages for copy-paste
+            if not total_time_df.empty and not encryption_df.empty and not decryption_df.empty:
+                st.success(f"""
+                **For Your Thesis Paper:**
+                
+                Test 1 - Average Approval Time: **{total_time_df['access_time_sec'].mean():.4f} seconds** (n={len(total_time_df)})
+                
+                Test 2 - Average Encryption Time: **{encryption_df['access_time_sec'].mean():.4f} seconds** (n={len(encryption_df)})
+                
+                Test 2 - Average Decryption Time: **{decryption_df['access_time_sec'].mean():.4f} seconds** (n={len(decryption_df)})
+                
+                Total Crypto Time: **{(encryption_df['access_time_sec'].mean() + decryption_df['access_time_sec'].mean()):.4f} seconds**
+                """)
         else:
-            st.info("No performance data yet.")
+            st.warning("No performance data yet. Run at least 10 request→approve→decrypt cycles.")
 
     with tab2:
-        st.subheader("ISO/IEC 25010:2015 Software Quality Evaluation")
-        with st.form("eval_form"):
-            evaluator_name = st.text_input("Evaluator Name", value=user_data['name'])
-            evaluator_role = st.text_input("Role/Expertise", value=user_data['department'])
-            evaluator_id = st.selectbox("Evaluator ID", [user_id])
-            st.divider()
-            st.write("**Rate each criterion (1 = Poor, 5 = Excellent)**")
-            responses = {}
-            for category, criteria in ISO_25010_CRITERIA.items():
-                st.subheader(category)
-                responses[category] = {}
-                for criterion in criteria:
-                    responses[category][criterion] = st.select_slider(
-                        criterion, options=LIKERT_SCALE, value=5, key=f"{category}_{criterion}"
-                    )
-            comments = st.text_area("Additional Comments / Recommendations")
-            submitted = st.form_submit_button("Submit Evaluation", type="primary")
-            if submitted:
-                save_evaluation(evaluator_name, evaluator_role, responses, comments)
-                st.success("Evaluation submitted successfully!")
-                st.balloons()
-
-        st.divider()
-        st.subheader("Aggregated Expert Evaluation Results")
-        summary_df = get_eval_summary()
-        if not summary_df.empty:
-            st.dataframe(summary_df, use_container_width=True)
-            avg_score = summary_df['Mean Score'].mean()
-            rating = get_descriptive_rating(avg_score)
-            st.metric("Overall System Quality Score", f"{avg_score:.2f} / 5.0", delta=rating)
-        else:
-            st.info("No evaluations submitted yet")
-
-    with tab3:
-        st.subheader("Audit Logs & Access Records - HIPAA + ISO 25010")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.write("**1. Performance Metrics (ISO 25010)**")
-            logs = read_logs()
-            if logs:
-                df = pd.DataFrame(logs)
-                st.dataframe(df, use_container_width=True)
-                st.download_button(
-                    "📥 Download Performance CSV",
-                    df.to_csv(index=False),
-                    "audit_logs_performance.csv",
-                    "text/csv"
-                )
-            else:
-                st.info("No performance logs yet")
-
-        with col2:
-            st.write("**2. Security Audit Trail (HIPAA)**")
-            sec_logs = read_security_logs()
-            if sec_logs:
-                sec_df = pd.DataFrame(sec_logs)
-                st.dataframe(sec_df, use_container_width=True)
-                st.download_button(
-                    "📥 Download Security Audit CSV",
-                    sec_df.to_csv(index=False),
-                    "security_audit.csv",
-                    "text/csv"
-                )
-            else:
-                st.info("No security events logged yet")
-
-        st.divider()
-        st.metric("Total Security Events", len(sec_logs) if sec_logs else 0)
+        st.subheader("Security Audit Trail - HIPAA Compliance")
+        st.caption("Proof that unauthorized access is blocked and all actions are logged")
+        
+        sec_logs = read_security_logs()
         if sec_logs:
+            sec_df = pd.DataFrame(sec_logs)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Security Events", len(sec_df))
             critical_count = sum(1 for log in sec_logs if log['severity'] == 'CRITICAL')
-            st.metric("Critical Alerts", critical_count, delta="Blocked" if critical_count > 0 else None)
-
-        st.divider()
-        st.write("**3. Complete Forensic Audit Dump (JSON)**")
-        st.caption("Contains all cryptographic material: nonces, public keys, signatures, MACs, security_alerts")
-
-        if st.button("🔍 Generate Full JSON Audit", type="primary"):
-            import json
-            def serialize_request(req):
-                serialized = {}
-                for key, value in req.items():
-                    if isinstance(value, bytes):
-                        serialized[key] = value.hex()
-                    elif key == 'provider_priv_key':
-                        serialized[key] = "[DELETED FOR PFS]"
-                    else:
-                        serialized[key] = value
-                return serialized
-
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT * FROM access_requests")
-            rows = c.fetchall()
-            columns = [description[0] for description in c.description]
-            conn.close()
-
-            full_audit = {
-                "export_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "total_requests": len(rows),
-                "requests": {row[0]: serialize_request(dict(zip(columns, row))) for row in rows}
-            }
-
-            json_str = json.dumps(full_audit, indent=2, default=str)
-
+            col2.metric("Critical Alerts", critical_count)
+            denied_count = sum(1 for log in sec_logs if log['event_type'] == 'PATIENT_ACCESS_DENIED')
+            col3.metric("Patient Denials", denied_count)
+            
+            st.dataframe(sec_df, use_container_width=True)
+            
             st.download_button(
-                "📥 Download complete_audit_trail.json",
-                json_str,
-                f"complete_audit_trail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                "application/json"
+                "📥 Download security_audit.csv",
+                sec_df.to_csv(index=False),
+                "security_audit.csv",
+                "text/csv"
             )
-
-            with st.expander("Preview JSON (First 50 lines)"):
-                preview = '\n'.join(json_str.split('\n')[:50])
-                st.code(preview + "\n...", language="json")
+            
+            # Show MITM/Key fail tests
+            mitm_tests = sec_df[sec_df['event_type'] == 'ECDSA_VERIFICATION_FAILED']
+            keyfail_tests = sec_df[sec_df['event_type'] == 'KEY_CONFIRMATION_FAILED']
+            
+            if not mitm_tests.empty or not keyfail_tests.empty:
+                st.success(f"✅ Security tests passed: {len(mitm_tests)} MITM attacks blocked, {len(keyfail_tests)} key mismatches blocked")
+        else:
+            st.info("No security events logged yet")
