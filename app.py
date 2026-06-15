@@ -343,10 +343,11 @@ elif user_data['role'] == "Patient":
         
         with col1:
             st.subheader("Basic Details")
-            st.write(f"**Full Name:** {user_data['name']}")
+            st.write(f"**Full Name:** {user_data.get('name', 'N/A')}")
             st.write(f"**Patient ID:** {user_id}")
-            st.write(f"**Record ID:** {user_data['record_id']}")
-            st.write(f"**Username:** {user_data['user_id']}")
+            st.write(f"**Record ID:** {user_data.get('record_id', 'N/A')}")
+            st.write(f"**Username:** {user_id}")  # FIXED: use user_id, not user_data['username']
+            st.write(f"**Role:** {user_data.get('role', 'N/A')}")
             
         with col2:
             st.subheader("Medical Profile")
