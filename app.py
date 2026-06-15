@@ -369,7 +369,7 @@ elif user_data['role'] == "Patient":
         columns = [col[1] for col in c.fetchall()]
 
         # Build query based on existing columns
-        base_cols = "file_id, file_name, file_type, description, provider_id"
+        base_cols = "file_id, file_name, file_type, file_description, provider_id"
         if 'file_size' in columns:
             base_cols += ", file_size"
         if 'uploaded_at' in columns:
