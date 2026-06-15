@@ -346,7 +346,7 @@ elif user_data['role'] == "Patient":
             st.write(f"**Full Name:** {user_data.get('name', 'N/A')}")
             st.write(f"**Patient ID:** {user_id}")
             st.write(f"**Record ID:** {user_data.get('record_id', 'N/A')}")
-            st.write(f"**Username:** {user_id}")  # FIXED: use user_id, not user_data['username']
+            st.write(f"**Username:** {user_id}")  
             st.write(f"**Role:** {user_data.get('role', 'N/A')}")
             
         with col2:
@@ -360,43 +360,67 @@ elif user_data['role'] == "Patient":
 
     # NEW: SHOW ALL MY FILES IN THE SYSTEM
     st.subheader("📁 My Medical Files on Record")
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT file_id, file_name, file_type, description, file_size, uploaded_at, provider_id 
-        FROM provider_files 
-        WHERE patient_id = ? 
-        ORDER BY uploaded_at DESC
-    """, (user_id,))
-    my_files = c.fetchall()
-    conn.close()
-
-    if my_files:
-        st.write(f"**Total files stored:** {len(my_files)}")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
         
-        # Group by provider
-        files_by_provider = {}
-        for file_data in my_files:
-            file_id, fname, ftype, desc, fsize, uploaded, prov_id = file_data
-            provider_name = USERS[prov_id]['name'] if prov_id in USERS else "Unknown"
-            if provider_name not in files_by_provider:
-                files_by_provider[provider_name] = []
-            files_by_provider[provider_name].append(file_data)
+        # Check what columns actually exist first
+        c.execute("PRAGMA table_info(provider_files)")
+        columns = [col[1] for col in c.fetchall()]
 
-        for provider_name, files in files_by_provider.items():
-            with st.expander(f"🏥 {provider_name} - {len(files)} file(s)"):
-                for file_id, fname, ftype, desc, fsize, uploaded, prov_id in files:
-                    col1, col2, col3 = st.columns([3, 2, 1])
-                    with col1:
-                        st.write(f"**{fname}**")
-                        st.caption(f"{desc}")
-                    with col2:
-                        st.write(f"Type: `{ftype}`")
-                        st.caption(f"Size: {fsize} bytes")
-                    with col3:
-                        st.caption(f"Uploaded: {uploaded[:10]}")
-    else:
-        st.info("No medical files have been uploaded for you yet.")
+        # Build query based on existing columns
+        base_cols = "file_id, file_name, file_type, description, provider_id"
+        if 'file_size' in columns:
+            base_cols += ", file_size"
+        if 'uploaded_at' in columns:
+            base_cols += ", uploaded_at"
+
+        c.execute(f"""
+            SELECT {base_cols}
+            FROM provider_files
+            WHERE patient_id =?
+            ORDER BY file_id DESC
+        """, (user_id,))
+        my_files = c.fetchall()
+        conn.close()
+
+        if my_files:
+            st.write(f"**Total files stored:** {len(my_files)}")
+
+            # Group by provider
+            files_by_provider = {}
+            for file_data in my_files:
+                file_id = file_data[0]
+                fname = file_data[1]
+                ftype = file_data[2]
+                desc = file_data[3]
+                prov_id = file_data[4]
+                fsize = file_data[5] if len(file_data) > 5 else "N/A"
+                uploaded = file_data[6] if len(file_data) > 6 else "N/A"
+
+                provider_name = USERS[prov_id]['name'] if prov_id in USERS else "Unknown"
+                if provider_name not in files_by_provider:
+                    files_by_provider[provider_name] = []
+                files_by_provider[provider_name].append((file_id, fname, ftype, desc, fsize, uploaded, prov_id))
+
+            for provider_name, files in files_by_provider.items():
+                with st.expander(f"🏥 {provider_name} - {len(files)} file(s)"):
+                    for file_id, fname, ftype, desc, fsize, uploaded, prov_id in files:
+                        col1, col2 = st.columns([3, 2])
+                        with col1:
+                            st.write(f"**{fname}**")
+                            st.caption(f"{desc}")
+                        with col2:
+                            st.write(f"Type: `{ftype}`")
+                            if fsize!= "N/A":
+                                st.caption(f"Size: {fsize} bytes")
+                            if uploaded!= "N/A":
+                                st.caption(f"Uploaded: {str(uploaded)[:10]}")
+        else:
+            st.info("No medical files have been uploaded for you yet.")
+    except Exception as e:
+        st.error(f"Could not load files: {e}")
+        st.caption("Check if provider_files table exists in database")
 
     st.divider()
 
