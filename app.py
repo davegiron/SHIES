@@ -346,7 +346,7 @@ elif user_data['role'] == "Patient":
             st.write(f"**Full Name:** {user_data['name']}")
             st.write(f"**Patient ID:** {user_id}")
             st.write(f"**Record ID:** {user_data['record_id']}")
-            st.write(f"**Username:** {user_data['username']}")
+            st.write(f"**Username:** {user_data['user_id']}")
             
         with col2:
             st.subheader("Medical Profile")
